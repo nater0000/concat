@@ -10,17 +10,23 @@
         label { font-weight: bold; display: block; margin-top: 10px; font-size: 0.9em; }
         input, textarea, button { width: 100%; box-sizing: border-box; margin-top: 5px; padding: 10px; border: 1px solid #ccc; border-radius: 4px; }
         textarea { height: 120px; font-family: monospace; white-space: pre; }
-        button { background: #0366d6; color: white; font-weight: bold; border: none; cursor: pointer; margin-top: 20px; }
-        button:disabled { background: #95bcf0; cursor: not-allowed; }
+        
+        button.primary-btn { background: #0366d6; color: white; font-weight: bold; border: none; cursor: pointer; margin-top: 20px; }
+        button.primary-btn:disabled { background: #95bcf0; cursor: not-allowed; }
+        
         #savedTokensRoster { font-size: 0.85em; margin-top: 8px; color: #555; }
         .roster-owner { color: #0366d6; text-decoration: none; font-weight: bold; }
         .roster-delete { color: #ff6188; text-decoration: none; margin-right: 12px; font-weight: bold; }
         
+        /* Terminal Console Styles */
+        .console-wrapper { margin-top: 20px; background: #1e1e1e; border-radius: 6px; overflow: hidden; box-shadow: inset 0 2px 4px rgba(0,0,0,0.5); }
+        .console-header { display: flex; justify-content: space-between; align-items: center; padding: 8px 15px; background: #2d2d2d; border-bottom: 1px solid #000; }
+        .copy-btn { margin: 0; padding: 4px 8px; background: #444; color: white; font-size: 0.8em; border: 1px solid #555; border-radius: 4px; width: auto; cursor: pointer; }
+        .copy-btn:hover { background: #555; }
+        
         #console { 
-            margin-top: 20px; background: #1e1e1e; color: #a9dc76; padding: 15px; 
-            border-radius: 6px; font-family: monospace; font-size: 13px; height: 250px; 
-            overflow-y: auto; white-space: pre-wrap; word-wrap: break-word;
-            box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
+            color: #a9dc76; padding: 15px; font-family: monospace; font-size: 13px; 
+            height: 210px; overflow-y: auto; white-space: pre-wrap; word-wrap: break-word;
         }
         .log-error { color: #ff6188; }
         .log-info { color: #78dce8; }
@@ -41,7 +47,7 @@
     <label>Max Output Size (MB)</label>
     <input type="number" id="maxSize" value="5" />
 
-    <label>Exclude Patterns</label>
+    <label>Exclude Patterns (one per line)</label>
     <textarea id="excludesInput">
 .git/*
 */.git/*
@@ -61,8 +67,15 @@ build/*
 concat-*.md
 </textarea>
 
-    <button id="generateBtn" onclick="run()">Generate Markdown</button>
-    <div id="console">Ready...</div>
+    <button id="generateBtn" class="primary-btn" onclick="run()">Generate Markdown</button>
+    
+    <div class="console-wrapper">
+        <div class="console-header">
+            <span style="font-size: 0.85em; color: #888;">Terminal Output</span>
+            <button id="copyLogBtn" onclick="copyLogs()" class="copy-btn">Copy Logs</button>
+        </div>
+        <div id="console">Ready...</div>
+    </div>
 </div>
 
 <script>
@@ -76,6 +89,18 @@ concat-*.md
         if (type) line.className = `log-${type}`;
         term.appendChild(line);
         term.scrollTop = term.scrollHeight; 
+    }
+
+    async function copyLogs() {
+        const btn = document.getElementById('copyLogBtn');
+        try {
+            await navigator.clipboard.writeText(term.innerText);
+            btn.innerText = 'Copied!';
+            setTimeout(() => btn.innerText = 'Copy Logs', 2000);
+        } catch (err) {
+            console.error('Copy failed:', err);
+            btn.innerText = 'Error';
+        }
     }
 
     // Token Management UI
@@ -177,12 +202,14 @@ concat-*.md
             for (const f of filteredFiles) markdown += `- ${f.path}\n`;
             markdown += `\n---\n\n`;
 
+            // FIXED: Use the Blobs API to bypass CORS restrictions
+            const fileHeaders = { ...headers, 'Accept': 'application/vnd.github.v3.raw' };
+
             for (let i = 0; i < filteredFiles.length; i++) {
                 const file = filteredFiles[i];
                 logMsg(`[${i + 1}/${filteredFiles.length}] Fetching ${file.path}...`);
                 
-                const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${file.path}`;
-                const fileRes = await fetch(rawUrl, { headers });
+                const fileRes = await fetch(file.url, { headers: fileHeaders });
                 
                 if (fileRes.ok) {
                     const text = await fileRes.text();
