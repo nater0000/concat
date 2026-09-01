@@ -12,20 +12,14 @@
         textarea { height: 120px; font-family: monospace; white-space: pre; }
         button { background: #0366d6; color: white; font-weight: bold; border: none; cursor: pointer; margin-top: 20px; }
         button:disabled { background: #95bcf0; cursor: not-allowed; }
+        #savedTokensRoster { font-size: 0.85em; margin-top: 8px; color: #555; }
+        .roster-owner { color: #0366d6; text-decoration: none; font-weight: bold; }
+        .roster-delete { color: #ff6188; text-decoration: none; margin-right: 12px; font-weight: bold; }
         
-        /* Terminal Console Styles */
         #console { 
-            margin-top: 20px; 
-            background: #1e1e1e; 
-            color: #a9dc76; 
-            padding: 15px; 
-            border-radius: 6px; 
-            font-family: monospace; 
-            font-size: 13px;
-            height: 250px; 
-            overflow-y: auto; 
-            white-space: pre-wrap;
-            word-wrap: break-word;
+            margin-top: 20px; background: #1e1e1e; color: #a9dc76; padding: 15px; 
+            border-radius: 6px; font-family: monospace; font-size: 13px; height: 250px; 
+            overflow-y: auto; white-space: pre-wrap; word-wrap: break-word;
             box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
         }
         .log-error { color: #ff6188; }
@@ -38,15 +32,16 @@
 <div class="card">
     <h2>Repo Concatenator</h2>
     <label>GitHub Repo URL (or owner/repo)</label>
-    <input type="text" id="repoInput" placeholder="nateri/llm-web-refactoring-test" />
+    <input type="text" id="repoInput" placeholder="nateri/llm-web-refactoring-test" autocomplete="off" />
 
-    <label>Personal Access Token (for private repos/rate limits)</label>
-    <input type="password" id="tokenInput" placeholder="ghp_..." />
+    <label>Personal Access Token (for private repos)</label>
+    <input type="password" id="tokenInput" placeholder="ghp_..." autocomplete="off" />
+    <div id="savedTokensRoster"></div>
 
     <label>Max Output Size (MB)</label>
     <input type="number" id="maxSize" value="5" />
 
-    <label>Exclude Patterns (one per line)</label>
+    <label>Exclude Patterns</label>
     <textarea id="excludesInput">
 .git/*
 */.git/*
@@ -72,17 +67,56 @@ concat-*.md
 
 <script>
     const term = document.getElementById('console');
+    let tokensMap = JSON.parse(localStorage.getItem('gh_pats') || '{}');
 
-    // Terminal Logging Utility
+    // Terminal Logging
     function logMsg(msg, type = '') {
         const line = document.createElement('div');
         line.textContent = `> ${msg}`;
         if (type) line.className = `log-${type}`;
         term.appendChild(line);
-        term.scrollTop = term.scrollHeight; // Auto-scroll to bottom
+        term.scrollTop = term.scrollHeight; 
     }
 
-    // Glob matcher
+    // Token Management UI
+    function renderRoster() {
+        const roster = document.getElementById('savedTokensRoster');
+        const owners = Object.keys(tokensMap);
+        if (owners.length === 0) {
+            roster.innerHTML = "<em>No tokens saved on this device.</em>";
+            return;
+        }
+        roster.innerHTML = "<strong>Saved vault:</strong> " + owners.map(o => 
+            `<a href="#" class="roster-owner" onclick="fillOwner('${o}'); return false;">${o}</a> ` +
+            `<a href="#" class="roster-delete" onclick="deleteToken('${o}'); return false;">(x)</a>`
+        ).join('');
+    }
+
+    function fillOwner(owner) {
+        document.getElementById('repoInput').value = owner + '/';
+        document.getElementById('tokenInput').value = tokensMap[owner];
+        document.getElementById('repoInput').focus();
+    }
+
+    function deleteToken(owner) {
+        delete tokensMap[owner];
+        localStorage.setItem('gh_pats', JSON.stringify(tokensMap));
+        document.getElementById('tokenInput').value = '';
+        renderRoster();
+        logMsg(`Deleted token for owner: ${owner}`, 'warn');
+    }
+
+    // Auto-fill token as user types
+    document.getElementById('repoInput').addEventListener('input', (e) => {
+        const raw = e.target.value.replace('https://github.com/', '').replace(/\/$/, '');
+        const owner = raw.split('/')[0];
+        if (owner && tokensMap[owner]) {
+            document.getElementById('tokenInput').value = tokensMap[owner];
+        }
+    });
+
+    window.onload = renderRoster;
+
     function matchGlob(path, pattern) {
         const escapeRegex = (s) => s.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
         const regexStr = '^' + pattern.split('*').map(escapeRegex).join('.*') + '$';
@@ -92,7 +126,7 @@ concat-*.md
     async function run() {
         const btn = document.getElementById('generateBtn');
         btn.disabled = true;
-        term.innerHTML = ''; // Clear terminal
+        term.innerHTML = ''; 
         
         try {
             const repoRaw = document.getElementById('repoInput').value.replace('https://github.com/', '').replace(/\/$/, '');
@@ -103,33 +137,32 @@ concat-*.md
             const maxSize = parseFloat(document.getElementById('maxSize').value) * 1024 * 1024;
             const excludes = document.getElementById('excludesInput').value.split('\n').map(l => l.trim()).filter(l => l);
 
+            if (token) {
+                tokensMap[owner] = token;
+                localStorage.setItem('gh_pats', JSON.stringify(tokensMap));
+                renderRoster();
+            }
+
             const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
 
             logMsg(`Target: ${owner}/${repo}`, 'info');
             logMsg(`Checking repository metadata...`);
 
-            // 1. Get default branch
             const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers });
             if (!repoRes.ok) throw new Error(`Repo fetch failed: ${repoRes.statusText}`);
             const repoData = await repoRes.json();
             const branch = repoData.default_branch;
             logMsg(`Resolved default branch: ${branch}`, 'info');
 
-            // 2. Get tree
             logMsg(`Fetching full directory tree from GitHub API...`);
             const treeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`, { headers });
             if (!treeRes.ok) throw new Error(`Tree fetch failed: ${treeRes.statusText}`);
             const treeData = await treeRes.json();
             
-            if (treeData.truncated) {
-                logMsg(`Warning: Repository tree is massive and was truncated by GitHub.`, 'warn');
-            }
+            if (treeData.truncated) logMsg(`Warning: Repository tree is massive and was truncated.`, 'warn');
 
-            // 3. Filter
             logMsg(`Filtering files...`);
             const files = treeData.tree.filter(item => item.type === 'blob');
-            logMsg(`Total blobs found: ${files.length}`);
-            
             const filteredFiles = files.filter(file => !excludes.some(pattern => matchGlob(file.path, pattern)));
             const totalBytes = filteredFiles.reduce((acc, f) => acc + f.size, 0);
             const sizeMB = (totalBytes / (1024 * 1024)).toFixed(2);
@@ -137,12 +170,8 @@ concat-*.md
             logMsg(`Files remaining after exclusions: ${filteredFiles.length}`, 'info');
             logMsg(`Estimated pure text size: ${sizeMB} MB`);
 
-            // 4. Size Check
-            if (totalBytes > maxSize) {
-                throw new Error(`Aborted: Output size (${sizeMB} MB) exceeds maximum limit of ${maxSize / (1024*1024)} MB.`);
-            }
+            if (totalBytes > maxSize) throw new Error(`Aborted: Output size (${sizeMB} MB) exceeds maximum limit.`);
 
-            // 5. Download Phase
             logMsg(`Starting sequence download of ${filteredFiles.length} files...`, 'info');
             let markdown = `# Repository Map\n\n`;
             for (const f of filteredFiles) markdown += `- ${f.path}\n`;
@@ -165,16 +194,13 @@ concat-*.md
                 }
             }
 
-            // 6. Output
             logMsg(`Concatenation complete. Generating file blob...`, 'info');
             const blob = new Blob([markdown], { type: 'text/markdown' });
             const url = URL.createObjectURL(blob);
             
             const a = document.createElement('a');
             a.href = url;
-            a.download = `concat-${new Date().toISOString().slice(0,10)}.md`;
-            
-            logMsg(`Triggering native browser download.`, 'info');
+            a.download = `${repo}-${new Date().toISOString().slice(0,10)}.md`;
             a.click();
             URL.revokeObjectURL(url);
             
