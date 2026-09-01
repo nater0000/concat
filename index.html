@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Repo to Markdown</title>
+    <style>
+        body { font-family: -apple-system, system-ui, sans-serif; padding: 20px; max-width: 600px; margin: auto; background: #f9f9f9; }
+        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        label { font-weight: bold; display: block; margin-top: 10px; font-size: 0.9em; }
+        input, textarea, button { width: 100%; box-sizing: border-box; margin-top: 5px; padding: 10px; border: 1px solid #ccc; border-radius: 4px; }
+        textarea { height: 120px; font-family: monospace; white-space: pre; }
+        button { background: #0366d6; color: white; font-weight: bold; border: none; cursor: pointer; margin-top: 20px; }
+        button:disabled { background: #95bcf0; cursor: not-allowed; }
+        
+        /* Terminal Console Styles */
+        #console { 
+            margin-top: 20px; 
+            background: #1e1e1e; 
+            color: #a9dc76; 
+            padding: 15px; 
+            border-radius: 6px; 
+            font-family: monospace; 
+            font-size: 13px;
+            height: 250px; 
+            overflow-y: auto; 
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
+        }
+        .log-error { color: #ff6188; }
+        .log-info { color: #78dce8; }
+        .log-warn { color: #ffd866; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h2>Repo Concatenator</h2>
+    <label>GitHub Repo URL (or owner/repo)</label>
+    <input type="text" id="repoInput" placeholder="nateri/llm-web-refactoring-test" />
+
+    <label>Personal Access Token (for private repos/rate limits)</label>
+    <input type="password" id="tokenInput" placeholder="ghp_..." />
+
+    <label>Max Output Size (MB)</label>
+    <input type="number" id="maxSize" value="5" />
+
+    <label>Exclude Patterns (one per line)</label>
+    <textarea id="excludesInput">
+.git/*
+*/.git/*
+node_modules/*
+*/node_modules/*
+pnpm-lock.yaml
+package-lock.json
+dist/*
+*/dist/*
+build/*
+*/build/*
+*.png
+*.jpg
+*.ico
+*.svg
+*.pdf
+concat-*.md
+</textarea>
+
+    <button id="generateBtn" onclick="run()">Generate Markdown</button>
+    <div id="console">Ready...</div>
+</div>
+
+<script>
+    const term = document.getElementById('console');
+
+    // Terminal Logging Utility
+    function logMsg(msg, type = '') {
+        const line = document.createElement('div');
+        line.textContent = `> ${msg}`;
+        if (type) line.className = `log-${type}`;
+        term.appendChild(line);
+        term.scrollTop = term.scrollHeight; // Auto-scroll to bottom
+    }
+
+    // Glob matcher
+    function matchGlob(path, pattern) {
+        const escapeRegex = (s) => s.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
+        const regexStr = '^' + pattern.split('*').map(escapeRegex).join('.*') + '$';
+        return new RegExp(regexStr).test(path);
+    }
+
+    async function run() {
+        const btn = document.getElementById('generateBtn');
+        btn.disabled = true;
+        term.innerHTML = ''; // Clear terminal
+        
+        try {
+            const repoRaw = document.getElementById('repoInput').value.replace('https://github.com/', '').replace(/\/$/, '');
+            if (!repoRaw.includes('/')) throw new Error("Invalid repo format. Use owner/repo.");
+            
+            const [owner, repo] = repoRaw.split('/');
+            const token = document.getElementById('tokenInput').value.trim();
+            const maxSize = parseFloat(document.getElementById('maxSize').value) * 1024 * 1024;
+            const excludes = document.getElementById('excludesInput').value.split('\n').map(l => l.trim()).filter(l => l);
+
+            const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+
+            logMsg(`Target: ${owner}/${repo}`, 'info');
+            logMsg(`Checking repository metadata...`);
+
+            // 1. Get default branch
+            const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers });
+            if (!repoRes.ok) throw new Error(`Repo fetch failed: ${repoRes.statusText}`);
+            const repoData = await repoRes.json();
+            const branch = repoData.default_branch;
+            logMsg(`Resolved default branch: ${branch}`, 'info');
+
+            // 2. Get tree
+            logMsg(`Fetching full directory tree from GitHub API...`);
+            const treeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`, { headers });
+            if (!treeRes.ok) throw new Error(`Tree fetch failed: ${treeRes.statusText}`);
+            const treeData = await treeRes.json();
+            
+            if (treeData.truncated) {
+                logMsg(`Warning: Repository tree is massive and was truncated by GitHub.`, 'warn');
+            }
+
+            // 3. Filter
+            logMsg(`Filtering files...`);
+            const files = treeData.tree.filter(item => item.type === 'blob');
+            logMsg(`Total blobs found: ${files.length}`);
+            
+            const filteredFiles = files.filter(file => !excludes.some(pattern => matchGlob(file.path, pattern)));
+            const totalBytes = filteredFiles.reduce((acc, f) => acc + f.size, 0);
+            const sizeMB = (totalBytes / (1024 * 1024)).toFixed(2);
+            
+            logMsg(`Files remaining after exclusions: ${filteredFiles.length}`, 'info');
+            logMsg(`Estimated pure text size: ${sizeMB} MB`);
+
+            // 4. Size Check
+            if (totalBytes > maxSize) {
+                throw new Error(`Aborted: Output size (${sizeMB} MB) exceeds maximum limit of ${maxSize / (1024*1024)} MB.`);
+            }
+
+            // 5. Download Phase
+            logMsg(`Starting sequence download of ${filteredFiles.length} files...`, 'info');
+            let markdown = `# Repository Map\n\n`;
+            for (const f of filteredFiles) markdown += `- ${f.path}\n`;
+            markdown += `\n---\n\n`;
+
+            for (let i = 0; i < filteredFiles.length; i++) {
+                const file = filteredFiles[i];
+                logMsg(`[${i + 1}/${filteredFiles.length}] Fetching ${file.path}...`);
+                
+                const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${file.path}`;
+                const fileRes = await fetch(rawUrl, { headers });
+                
+                if (fileRes.ok) {
+                    const text = await fileRes.text();
+                    const ext = file.path.split('.').pop();
+                    markdown += `## File: ${file.path}\n\`\`\`${ext}\n${text}\n\`\`\`\n\n`;
+                } else {
+                    logMsg(`Failed to fetch: ${file.path}`, 'error');
+                    markdown += `## File: ${file.path}\n*Failed to download file.*\n\n`;
+                }
+            }
+
+            // 6. Output
+            logMsg(`Concatenation complete. Generating file blob...`, 'info');
+            const blob = new Blob([markdown], { type: 'text/markdown' });
+            const url = URL.createObjectURL(blob);
+            
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `concat-${new Date().toISOString().slice(0,10)}.md`;
+            
+            logMsg(`Triggering native browser download.`, 'info');
+            a.click();
+            URL.revokeObjectURL(url);
+            
+            logMsg(`Done!`, 'info');
+
+        } catch (err) {
+            logMsg(`[FATAL] ${err.message}`, 'error');
+            console.error(err);
+        } finally {
+            btn.disabled = false;
+        }
+    }
+</script>
+</body>
+</html>
